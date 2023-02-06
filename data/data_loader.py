@@ -4,6 +4,7 @@ import logging
 # import numpy as np
 import torch
 from torch.utils.data.dataset import Dataset
+from tqdm import tqdm
 
 
 class QQPDataset(Dataset):
@@ -13,7 +14,7 @@ class QQPDataset(Dataset):
         self.tokenizer = tokenizer
         self.filename = filename
         self.max_length = max_length
-        self.device = device
+        self.device = 'cpu' # device # !!! test device, 
         self.is_inference = bool(is_inference)
         self.is_toy = is_toy
 
@@ -37,20 +38,20 @@ class QQPDataset(Dataset):
 
     def load_dataset(self, noised=False):
         filename = self.filename
-        if noised is True:
-            filename += '.0'
+        # if noised is True:
+        #     filename += '.0'
         logging.info("Loading data from {}".format(filename))
 
         data = []
         with open(filename) as f:
             reader = csv.reader(f)
-            for corrupted, sentence in reader:
+            for corrupted, sentence in tqdm(reader):
                 data.append([corrupted, sentence])
                 if self.is_toy is True:
                     break
 
         tokens_list, labels_list = [], []
-        for corrupted, sentence in data:
+        for corrupted, sentence in tqdm(data):
             tokens, labels = self.formatting(corrupted, sentence)
             tokens_list.append(tokens)
             labels_list.append(labels)

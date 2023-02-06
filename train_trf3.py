@@ -9,20 +9,29 @@ import numpy as np
 import torch
 from transformers import Trainer, TrainingArguments
 from transformers.integrations import TensorBoardCallback
+from transformers.trainer_pt_utils import get_parameter_names
 
 from model.kogpt_finetune_model import FinetuneKoGPT
 from data.data_loader import QQPDataset
+import bitsandbytes as bnb
 
 
 start_datetime = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
 
+def set_optim_to_run_embedding_in_fp32(model):
+    for module in model.modules():
+        if isinstance(module, torch.nn.Embedding):
+            bnb.optim.GlobalOptimManager.get_instance().register_module_override(module, 'weight', {'optim_bits': 32})
 
+### transformers==3.0.2
 def train(args):
     device = args.device
     batch_size = args.batch_size
 
     gpt_model = FinetuneKoGPT(args)
     gpt_model.build_model(checkpoint_dir=args.checkpoint)
+    set_optim_to_run_embedding_in_fp32(gpt_model.model) # newly added
+    gpt_model.model.use_cache = False # newly added
 
     train_dataset = QQPDataset(gpt_model.tokenizer, args.train_data_path,
                                max_length=args.max_length,
@@ -54,7 +63,35 @@ def train(args):
         disable_tqdm=False,
         report_to="tensorboard", # -> newly added
         prediction_loss_only=True, # moved from Trainer to TrainingArguments
-        dataloader_pin_memory=False
+        dataloader_pin_memory=False, # -> newly added
+        gradient_checkpointing=True, # -> newly added
+        fp16=True, # -> newly added
+        adafactor=True, # -> newly added
+    )
+
+    decay_parameters = get_parameter_names(gpt_model.model, [torch.nn.LayerNorm])
+    decay_parameters = [name for name in decay_parameters if "bias" not in name]
+    optimizer_grouped_parameters = [
+        {
+            "params": [p for n, p in gpt_model.model.named_parameters() if n in decay_parameters],
+            "weight_decay": training_args.weight_decay,
+        },
+        {
+            "params": [p for n, p in gpt_model.model.named_parameters() if n not in decay_parameters],
+            "weight_decay": 0.0,
+        },
+    ]
+
+    optimizer_kwargs = {
+        "betas": (training_args.adam_beta1, training_args.adam_beta2),
+        "eps": training_args.adam_epsilon,
+    }
+    optimizer_kwargs["lr"] = training_args.learning_rate
+    adam_bnb_optim = bnb.optim.Adam8bit(
+        optimizer_grouped_parameters,
+        betas=(training_args.adam_beta1, training_args.adam_beta2),
+        eps=training_args.adam_epsilon,
+        lr=training_args.learning_rate,
     )
 
     trainer = Trainer(
@@ -63,6 +100,7 @@ def train(args):
         train_dataset=train_dataset,
         eval_dataset=dev_dataset,
         callbacks=[TensorBoardCallback(tb_writer=gpt_model.writer)], # tb_writer=gpt_model.writer, -> deprecated
+        optimizers=(adam_bnb_optim, None),
     )
 
     trainer.train()
